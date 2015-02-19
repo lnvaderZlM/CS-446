@@ -325,6 +325,7 @@ public class CPU
             //Stack overflow!
             //This was probably deliberate because we had to overwrite the
             //program with stack memory to do this.
+        	System.out.println("push");
             m_TH.interruptIllegalMemoryAccess(m_registers[SP] + m_registers[BASE]);
         }
         m_RAM.write(m_registers[SP] + m_registers[BASE], value);
@@ -340,8 +341,10 @@ public class CPU
      */
     public int popStack() {
         m_registers[SP]++;
+        
         if (!validMemory(m_registers[SP] + m_registers[BASE])) {
             //Stack underflow!
+        	System.out.println("pop");
             m_TH.interruptIllegalMemoryAccess(m_registers[SP] + m_registers[BASE]);
         }
         return m_RAM.read(m_registers[SP] + m_registers[BASE]);
@@ -443,6 +446,7 @@ public class CPU
 
             //Check for out of bounds PC
             if (!validMemory(m_registers[BASE] + m_registers[PC])) {
+            	System.out.println("here");
                 m_TH.interruptIllegalMemoryAccess(m_registers[BASE] + m_registers[PC]);
                 return;
             }

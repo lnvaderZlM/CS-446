@@ -21,7 +21,7 @@ public class SOS implements CPU.TrapHandler {
 	 * This flag causes the SOS to print lots of potentially helpful status
 	 * messages
 	 **/
-	public static final boolean m_verbose = false;
+	public static final boolean m_verbose = true;
 
 	/**
 	 * The CPU the operating system is managing.
@@ -196,12 +196,22 @@ public class SOS implements CPU.TrapHandler {
 
 	}// printProcessTable
 
-	// <method header needed>
+	/**
+	 * removeCurrentProcess
+	 * 
+	 * removes the current process from the process table and arrange for a new
+	 * process to get assigned to be the current process
+	 */
 	public void removeCurrentProcess() {
 		// %%%You will implement this method
+		int id = m_currProcess.getProcessId();
+		int base = m_CPU.getBASE();
+		debugPrintln("removing process with id "+id +" at "+base);
 		ProcessControlBlock toRemove = m_currProcess;
 		m_processes.remove(toRemove);
 		scheduleNewProcess();
+
+		
 	}// removeCurrentProcess
 
 	/**
@@ -228,18 +238,32 @@ public class SOS implements CPU.TrapHandler {
 		return null; // no processes are Ready
 	}// getRandomProcess
 
-	// <method header needed>
+	/**
+	 * scheduleNewProcess
+	 * 
+	 * gets a random process to be the new current process or exits the program
+	 * if there are no more processes
+	 */
 	public void scheduleNewProcess() {
 		// %%%You will implement this method
-		System.out.println("herp");
+		if(m_processes.size()==0)
+		{
+			System.out.println("No more processes to run. Stopping.");
+			System.exit(0);
+		}
 		ProcessControlBlock newProcess = getRandomProcess();
 		if (newProcess == null) {
+			System.out.println("THIS SHOULDN'T BE HAPPENING YET");
 			System.exit(0);
 		}
 		ProcessControlBlock old = m_currProcess;
 		old.save(m_CPU);
-		m_CPU.pushStack(SYSCALL_EXEC);
-		systemCall();
+		m_currProcess = newProcess;
+		int id = m_currProcess.getProcessId();
+		debugPrintln("Switched to process with id " + id);
+		m_currProcess.restore(m_CPU);
+		
+		
 	}// scheduleNewProcess
 
 	/**
@@ -275,37 +299,41 @@ public class SOS implements CPU.TrapHandler {
 	 *            The amount of memory to allocate for the program.
 	 */
 	public void createProcess(Program prog, int allocSize) {
-		final int base = 4; // This is just an arbitrary base, hardcoded for now
-		// if there are currently other processes, then save their registers
-		if (!m_processes.isEmpty()) {
-			Enumeration<ProcessControlBlock> proc = m_processes.elements();
-			while (proc.hasMoreElements()) {
-				ProcessControlBlock b = proc.nextElement();
-				b.save(m_CPU);
-			}
-		}
-		m_CPU.setBASE(base);
-		m_CPU.setLIM(base + allocSize);
-		m_CPU.setPC(0); // We are going to use a logical (not physical) PC
-		int size = prog.getSize();
-		if (m_nextLoadPos + size >= m_RAM.getSize()) {
+		//final int base = 4; // This is just an arbitrary base, hardcoded for now
+		//int size = prog.getSize();
+
+		if (m_nextLoadPos + allocSize >= m_RAM.getSize()) {
 			System.out.println("NO RAM");
 			System.exit(0);
 			return;
 		}
+		if(m_currProcess!=null)
+		{
+			m_currProcess.save(m_CPU);
+		}
+
+		m_CPU.setBASE(m_nextLoadPos);
+		m_CPU.setLIM(m_nextLoadPos + allocSize);
+		m_CPU.setPC(4); // We are going to use a logical (not physical) PC
+		m_CPU.setSP(allocSize);
+
 		int[] progArray = prog.export();
 
 		for (int progAddr = 0; progAddr < progArray.length; ++progAddr) {
-			int loc = base + progAddr;
+			int loc = m_CPU.getBASE() + progAddr+4;//m_nextLoadPos;
 			m_RAM.write(loc, progArray[progAddr]);
 		}
-
-		m_nextLoadPos = prog.getSize();
+		debugPrintln("Installed program of size " + allocSize
+				+ " at position " + m_nextLoadPos);
+		m_nextLoadPos = m_nextLoadPos+ allocSize;
 		ProcessControlBlock newProcess = new ProcessControlBlock(
 				m_nextProcessID);
 		m_nextProcessID++;
+		m_processes.add(newProcess);
 		m_currProcess = newProcess;
-		m_CPU.setSP(allocSize); // Stack starts at the bottom and grows up.
+		printProcessTable();
+
+		//m_CPU.setSP(allocSize); // Stack starts at the bottom and grows up.
 
 	}// createProcess
 
@@ -368,7 +396,8 @@ public class SOS implements CPU.TrapHandler {
 	 * Exits from the current process.
 	 */
 	private void syscallExit() {
-		System.exit(0);
+		removeCurrentProcess();
+		
 	}
 
 	/**
@@ -421,12 +450,10 @@ public class SOS implements CPU.TrapHandler {
 	public void syscallOpen() {
 		// Retrive deviceInfo from stack
 		int deviceNumber = m_CPU.popStack();
-		if(deviceFound(deviceNumber)==null)
-		{
+		if (deviceFound(deviceNumber) == null) {
 			m_CPU.pushStack(DEVICE_NOT_FOUND);
 			return;
 		}
-		// deviceNumber--;
 		DeviceInfo info = deviceFound(deviceNumber);
 		boolean currentlyUsed = info.containsProcess(m_currProcess);
 		// if the device is currently being used, we can't open it.
@@ -435,16 +462,20 @@ public class SOS implements CPU.TrapHandler {
 			return;
 		}
 		Device dev = info.getDevice();
-		if (!dev.isSharable() && currentlyUsed) {
-			m_CPU.pushStack(ALREADY_OPENED);
-			return;
+		boolean currentlyUsedByOther = !info.unused();
+		boolean notSharable = !dev.isSharable();
+		if (notSharable && currentlyUsedByOther) {
+			System.out.println("blocking");
+			m_currProcess.block(m_CPU, dev, SYSCALL_OPEN, 100);
 		}
+
 
 		// Indicate that the process is currently using the device
 		info.addProcess(m_currProcess);
 
 		// Success
 		m_CPU.pushStack(0);
+
 	}
 
 	/**
@@ -454,8 +485,7 @@ public class SOS implements CPU.TrapHandler {
 
 		// Retrieve associated device info, and unassign device to a process
 		int deviceNumber = m_CPU.popStack();
-		if(deviceFound(deviceNumber)==null)
-		{
+		if (deviceFound(deviceNumber) == null) {
 			m_CPU.pushStack(DEVICE_NOT_FOUND);
 			return;
 		}
@@ -467,7 +497,17 @@ public class SOS implements CPU.TrapHandler {
 		}
 		// remove the device from the process
 		info.removeProcess(m_currProcess);
-
+		Device dev = info.getDevice();
+		while (true) {
+			ProcessControlBlock toUnblock = selectBlockedProcess(dev,
+					SYSCALL_OPEN, 100);
+			if (toUnblock == null) {
+				break;
+			}
+			int id = toUnblock.getProcessId();
+			System.out.println("Moving process with id "+ id + " from blocked to ready state.");
+			toUnblock.unblock();
+		}
 		// Close operation has completed successfully.
 		// 0 signifies successful completion
 		m_CPU.pushStack(0);
@@ -484,8 +524,7 @@ public class SOS implements CPU.TrapHandler {
 		// if (!deviceFound(deviceInfo)) {
 		// return;
 		// }
-		if(deviceFound(deviceInfo)==null)
-		{
+		if (deviceFound(deviceInfo) == null) {
 			m_CPU.pushStack(DEVICE_NOT_FOUND);
 			return;
 		}
@@ -521,8 +560,7 @@ public class SOS implements CPU.TrapHandler {
 		// return;
 		// }
 		// retrieve device information, get the device, and write.
-		if(deviceFound(deviceInfo)==null)
-		{
+		if (deviceFound(deviceInfo) == null) {
 			m_CPU.pushStack(DEVICE_NOT_FOUND);
 			return;
 		}
@@ -599,9 +637,14 @@ public class SOS implements CPU.TrapHandler {
 
 	}// syscallExec
 
-	// <method header needed>
+	/**
+	 * sysCallYield
+	 * 
+	 * moves the current process from the running state to the ready state
+	 */
 	private void syscallYield() {
-		// %%%You will implement this method
+		scheduleNewProcess();
+		
 	}// syscallYield
 
 	/**
@@ -665,6 +708,14 @@ public class SOS implements CPU.TrapHandler {
 			break;
 		case SYSCALL_WRITE:
 			syscallWrite();
+			break;
+
+		case SYSCALL_EXEC:
+			syscallExec();
+			break;
+
+		case SYSCALL_YIELD:
+			syscallYield();
 			break;
 		}
 	}
